@@ -16,18 +16,32 @@ Telegram bots that stream responses send them as a burst of sequential messages 
 
 ## MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `telegram_send_and_wait` | Send a command to @NSHClawBot, wait for the complete response using EOT detection, return all messages concatenated |
-| `telegram_get_history` | Read the last N messages from the @NSHClawBot chat with sender, timestamp, and text |
-| `telegram_send_message` | Fire-and-forget: send a message to @NSHClawBot and return immediately with no polling |
+| Tool | When to use | Description |
+|------|-------------|-------------|
+| `telegram_send_and_wait` | New tasks | Send a fresh command, block until EOT or hard timeout |
+| `telegram_context_and_send` | Iterating on existing work | Auto-prepend recent chat history as context, then send and wait |
+| `telegram_status` | Pulse checks | Quick 30s status query — is the bot alive, what's it doing? |
+| `telegram_get_history` | Reading past messages | Fetch last N messages with sender, timestamp, text |
+| `telegram_send_message` | Fire-and-forget | Send without waiting for any response |
 
 ### `telegram_send_and_wait`
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `message` | string | Yes | — | The command message to send to @NSHClawBot |
-| `timeout_seconds` | number | No | 120 | Max seconds to wait for the first response before considering the bot unresponsive |
+| `timeout_seconds` | number | No | 300 | Hard timeout before diagnostic ping |
+
+### `telegram_context_and_send`
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `message` | string | Yes | — | The follow-up instruction to send |
+| `history_limit` | number | No | 10 | Number of recent messages to include as context |
+| `timeout_seconds` | number | No | 300 | Hard timeout before diagnostic ping |
+
+### `telegram_status`
+
+No parameters. Sends a fixed status query, returns within 30 seconds.
 
 ### `telegram_get_history`
 
@@ -43,29 +57,26 @@ Telegram bots that stream responses send them as a burst of sequential messages 
 
 ## End-of-Transmission (EOT) Protocol
 
-The server uses a three-tier detection system to know when the bot has finished responding:
+The server uses a two-tier detection system to know when the bot has finished responding:
 
-### 1. EOT Signal (primary path)
+### 1. EOT Signal (primary — only return path)
 
 The bot appends a checkmark emoji to its final completion message. The moment the server sees a message ending with that marker, it:
 
 - Strips the marker and any surrounding whitespace from the message
 - Concatenates all collected messages in chronological order
-- Returns immediately — no idle wait needed
+- Returns immediately
 
-The marker is **always stripped** before returning, so callers never see it.
+The marker is **always stripped** before returning, so callers never see it. The idle timer does **not** cause the tool to return — it only exists to detect burst boundaries. The tool blocks indefinitely until EOT arrives or the hard timeout is reached.
 
-### 2. Idle Timer (fallback path)
+### 2. Hard Timeout (safety net)
 
-If the bot does not send the EOT marker (crash, stuck loop, older bot version), a **30-second idle timer** kicks in. Every new message resets the timer. If 30 full seconds pass with no new message, the server returns all collected messages.
-
-### 3. Hard Timeout (safety net)
-
-If `timeout_seconds` (default 120) elapses before the **first** reply ever arrives:
+If `timeout_seconds` (default 300) elapses with no EOT detected:
 
 1. A diagnostic ping is sent: _"Previous command may not have completed — are you still running?"_
-2. Waits an additional 30 seconds for any response
-3. If still nothing, returns an error: `"OpenClaw unresponsive — recommend checking systemctl --user status openclaw-gateway on Oracle instance 132.226.77.178"`
+2. Waits an additional 30 seconds
+3. If any messages were collected, returns them concatenated (partial result)
+4. If nothing was collected, returns an error: `"OpenClaw unresponsive — recommend checking systemctl --user status openclaw-gateway on Oracle instance 132.226.77.178"`
 
 ### Bot-Side Configuration
 
@@ -75,51 +86,53 @@ OpenClaw's `AGENTS.md` has been updated with the corresponding rule: append the 
 
 ```
 Claude sends "telegram_send_and_wait" tool call
-         │
-         ▼
-┌─────────────────────────────────────────────────┐
-│  1. Record baseline (latest message ID)         │
-│  2. Send command to @NSHClawBot via Telegram    │
-│  3. Poll every 2s for new messages              │
-│  4. On each message, check for EOT marker       │
-│  5. EOT found → strip marker, return instantly  │
-│  6. No EOT → 30s idle fallback                  │
-│  7. Concatenate all messages, return as string   │
-└─────────────────────────────────────────────────┘
-         │
-         ▼
+         |
+         v
++--------------------------------------------------+
+|  1. Record baseline (latest message ID)          |
+|  2. Send command to @NSHClawBot via Telegram     |
+|  3. Poll every 2s for new messages               |
+|  4. On each message, check for EOT marker        |
+|  5. EOT found -> strip marker, return instantly  |
+|  6. No EOT -> keep blocking until hard timeout   |
+|  7. Concatenate all messages, return as string    |
++--------------------------------------------------+
+         |
+         v
 Claude receives full response in one tool result
 ```
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│           Telegram MCP Server                   │
-│                                                 │
-│  ┌─────────────┐      ┌──────────────────┐     │
-│  │ MCP Server  │      │  Python Helper   │     │
-│  │ (Streamable │─────►│  (Telethon)      │     │
-│  │  HTTP)      │      │                  │     │
-│  │ Express +   │      │  - Send & wait   │     │
-│  │ TypeScript  │      │  - Get history   │     │
-│  └─────────────┘      │  - Send message  │     │
-│                       │  - EOT detect    │     │
-│                       └──────────────────┘     │
-│                              │                  │
-│                              ▼                  │
-│                       ┌──────────────────┐     │
-│                       │  Telegram API    │     │
-│                       │  (MTProto)       │     │
-│                       └──────────────────┘     │
-└─────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────┐
-│  Claude.ai Custom Connector                     │
-│  Desktop · Mobile · Web                         │
-│  "Send /status to OpenClaw"                     │
-└─────────────────────────────────────────────────┘
++--------------------------------------------------+
+|           Telegram MCP Server                    |
+|                                                  |
+|  +-------------+      +------------------+      |
+|  | MCP Server  |      |  Python Helper   |      |
+|  | (Streamable |----->|  (Telethon)      |      |
+|  |  HTTP)      |      |                  |      |
+|  | Express +   |      |  - Send & wait   |      |
+|  | TypeScript  |      |  - Context+send  |      |
+|  +-------------+      |  - Status check  |      |
+|                       |  - Get history   |      |
+|                       |  - Send message  |      |
+|                       |  - EOT detect    |      |
+|                       +------------------+      |
+|                              |                   |
+|                              v                   |
+|                       +------------------+      |
+|                       |  Telegram API    |      |
+|                       |  (MTProto)       |      |
+|                       +------------------+      |
++--------------------------------------------------+
+         |
+         v
++--------------------------------------------------+
+|  Claude.ai Custom Connector                     |
+|  Desktop - Mobile - Web                          |
+|  "Send /status to OpenClaw"                      |
++--------------------------------------------------+
 ```
 
 ### Why Python + Telethon?
@@ -206,7 +219,7 @@ server {
 }
 ```
 
-> **Important:** The `proxy_read_timeout` and `proxy_send_timeout` must be set high enough to cover the longest possible tool call (up to 120s + 30s diagnostic wait + buffer). The defaults (60s) will cause nginx to drop the SSE connection mid-request, resulting in `"MCP server connection lost"` errors on the client.
+> **Important:** The `proxy_read_timeout` and `proxy_send_timeout` must be set high enough to cover the longest possible tool call (up to 300s + 30s diagnostic wait + buffer). The defaults (60s) will cause nginx to drop the SSE connection mid-request, resulting in `"MCP server connection lost"` errors on the client.
 
 Then add SSL and enable:
 
@@ -241,13 +254,14 @@ These values are set in `telegram_helper.py`:
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `poll_interval` | 2s | How often to check for new messages |
-| `idle_timeout` | 30s | Silence duration before fallback return (when no EOT received) |
-| `timeout_seconds` | 120s | Hard ceiling before diagnostic ping (configurable per-call) |
+| `timeout_seconds` | 300s | Hard ceiling before diagnostic ping (configurable per-call) |
 | Diagnostic ping wait | 30s | Extra wait after sending a diagnostic ping |
+| `telegram_status` timeout | 30s | Fixed short timeout for pulse checks |
+| `telegram_status` idle | 15s | Idle return for status responses |
 
 ## Timeout Configuration
 
-Tool calls can take up to 150 seconds (120s timeout + 30s diagnostic ping wait). Every layer must allow this:
+Tool calls can take up to 330 seconds (300s timeout + 30s diagnostic ping wait). Every layer must allow this:
 
 | Layer | Setting | Value | Why |
 |-------|---------|-------|-----|

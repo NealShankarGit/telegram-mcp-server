@@ -23,6 +23,7 @@ interface ToolArguments {
 	message?: string;
 	timeout_seconds?: number;
 	limit?: number;
+	history_limit?: number;
 }
 
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -80,11 +81,11 @@ function createMcpServer(): Server {
 			{
 				name: 'telegram_send_and_wait',
 				description:
-					'Send a command to @NSHClawBot and wait for the complete response. ' +
-					'Uses an end-of-transmission (EOT) protocol: watches for a checkmark emoji ' +
-					'as termination signal in the bot\'s final message, then returns immediately. ' +
-					'Falls back to a 30-second idle timer if EOT is not received. ' +
-					'Hard timeout at 120 seconds (configurable) triggers a diagnostic ping. ' +
+					'Send a new task or command to @NSHClawBot and wait for the complete response. ' +
+					'Use this for fresh instructions where no prior context is needed. ' +
+					'Only returns when the bot sends its EOT signal (checkmark emoji) or the hard timeout (default 300s) is reached. ' +
+					'The idle timer does NOT cause a return — the tool blocks until EOT or timeout. ' +
+					'If timeout elapses, sends a diagnostic ping and waits 30 more seconds before returning an error. ' +
 					'All collected messages are concatenated chronologically. The EOT marker is always stripped before returning.',
 				inputSchema: {
 					type: 'object',
@@ -95,11 +96,46 @@ function createMcpServer(): Server {
 						},
 						timeout_seconds: {
 							type: 'number',
-							description:
-								'Maximum seconds to wait for the first response before considering the bot unresponsive (default: 120)',
+							description: 'Hard timeout in seconds before diagnostic ping (default: 300)',
 						},
 					},
 					required: ['message'],
+				},
+			},
+			{
+				name: 'telegram_context_and_send',
+				description:
+					'Send a follow-up instruction to @NSHClawBot with recent conversation history automatically prepended. ' +
+					'Use this when iterating on an existing task so OpenClaw has context from the prior exchange. ' +
+					'Reads the last history_limit messages, formats them with sender/timestamp/text, ' +
+					'prepends them as "Recent conversation context:", then sends and waits for EOT exactly like telegram_send_and_wait.',
+				inputSchema: {
+					type: 'object',
+					properties: {
+						message: {
+							type: 'string',
+							description: 'The follow-up instruction to send to @NSHClawBot',
+						},
+						history_limit: {
+							type: 'number',
+							description: 'Number of recent messages to include as context (default: 10)',
+						},
+						timeout_seconds: {
+							type: 'number',
+							description: 'Hard timeout in seconds before diagnostic ping (default: 300)',
+						},
+					},
+					required: ['message'],
+				},
+			},
+			{
+				name: 'telegram_status',
+				description:
+					'Quick pulse check on @NSHClawBot. Sends a short status query and returns whatever comes back within 30 seconds. ' +
+					'Use this to check if the bot is alive and what it is currently working on before sending a new task.',
+				inputSchema: {
+					type: 'object',
+					properties: {},
 				},
 			},
 			{
@@ -146,10 +182,31 @@ function createMcpServer(): Server {
 				if (!typedArgs.message) {
 					throw new McpError(ErrorCode.InvalidParams, 'message is required');
 				}
-				const timeout = typedArgs.timeout_seconds ?? 120;
+				const timeout = typedArgs.timeout_seconds ?? 300;
 				const result = await callTelegramHelper(
 					{ command: 'send_and_wait', message: typedArgs.message, timeout_seconds: timeout },
 					(timeout + 60) * 1000,
+				);
+				return { content: [{ type: 'text', text: result }] };
+			}
+
+			case 'telegram_context_and_send': {
+				if (!typedArgs.message) {
+					throw new McpError(ErrorCode.InvalidParams, 'message is required');
+				}
+				const timeout = typedArgs.timeout_seconds ?? 300;
+				const historyLimit = typedArgs.history_limit ?? 10;
+				const result = await callTelegramHelper(
+					{ command: 'context_and_send', message: typedArgs.message, history_limit: historyLimit, timeout_seconds: timeout },
+					(timeout + 60) * 1000,
+				);
+				return { content: [{ type: 'text', text: result }] };
+			}
+
+			case 'telegram_status': {
+				const result = await callTelegramHelper(
+					{ command: 'status' },
+					60_000,
 				);
 				return { content: [{ type: 'text', text: result }] };
 			}
