@@ -19,7 +19,7 @@ Telegram bots that stream responses send them as a burst of sequential messages 
 | Tool | When to use | Description |
 |------|-------------|-------------|
 | `telegram_send_and_wait` | New tasks | Send a fresh command, block until EOT or hard timeout |
-| `telegram_context_and_send` | Iterating on existing work | Auto-prepend recent chat history as context, then send and wait |
+| `telegram_context_and_send` | Iterating on existing work | Prepend `[WITH CONTEXT n]` prefix — OpenClaw fetches its own history locally on Oracle |
 | `telegram_status` | Pulse checks | Quick 30s status query — is the bot alive, what's it doing? |
 | `telegram_get_history` | Reading past messages | Fetch last N messages with sender, timestamp, text |
 | `telegram_send_message` | Fire-and-forget | Send without waiting for any response |
@@ -36,8 +36,10 @@ Telegram bots that stream responses send them as a burst of sequential messages 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `message` | string | Yes | — | The follow-up instruction to send |
-| `history_limit` | number | No | 10 | Number of recent messages to include as context |
+| `history_limit` | number | No | 10 | Number of recent messages OpenClaw should fetch as context |
 | `timeout_seconds` | number | No | 300 | Hard timeout before diagnostic ping |
+
+The message is sent as `[WITH CONTEXT 10] Your instruction here`. OpenClaw strips the prefix, fetches the last N messages from its own Telegram chat using its local Telethon client, prepends them internally as context, then executes the instruction. Context never travels through Telegram — it stays on Oracle.
 
 ### `telegram_status`
 
@@ -59,19 +61,23 @@ No parameters. Sends a fixed status query, returns within 30 seconds.
 
 The server uses a two-tier detection system to know when the bot has finished responding:
 
-### 1. EOT Signal (primary — only return path)
+### 1. EOT Signal with Nonce (primary — only return path)
 
-The bot appends a checkmark emoji to its final completion message. The moment the server sees a message ending with that marker, it:
+Each outgoing message is prepended with a unique 6-character hex nonce: `[req:a3f7b2] Your instruction here`. The bot must echo this nonce back in its final message alongside the checkmark EOT marker.
 
-- Strips the marker and any surrounding whitespace from the message
+When the server sees a message ending with the checkmark **and** the collected burst contains the matching `[req:XXXXXX]` tag, it:
+
+- Strips the EOT marker and all `[req:XXXXXX]` tags from the output
 - Concatenates all collected messages in chronological order
 - Returns immediately
 
-The marker is **always stripped** before returning, so callers never see it. The idle timer does **not** cause the tool to return — it only exists to detect burst boundaries. The tool blocks indefinitely until EOT arrives or the hard timeout is reached.
+Any checkmark that arrives **without** the matching nonce is ignored — it belongs to a different session or a manual message. This prevents race conditions when multiple senders use the same Telegram chat simultaneously.
+
+Nonces are generated with `secrets.token_hex(3)` (6 hex chars). Both the nonce tag and EOT marker are **always stripped** before returning, so callers never see them.
 
 ### 2. Hard Timeout (safety net)
 
-If `timeout_seconds` (default 300) elapses with no EOT detected:
+If `timeout_seconds` (default 300) elapses with no matching EOT detected:
 
 1. A diagnostic ping is sent: _"Previous command may not have completed — are you still running?"_
 2. Waits an additional 30 seconds
@@ -80,7 +86,10 @@ If `timeout_seconds` (default 300) elapses with no EOT detected:
 
 ### Bot-Side Configuration
 
-OpenClaw's `AGENTS.md` has been updated with the corresponding rule: append the EOT marker only to the final completion message of any response. The marker must be the last non-whitespace character in the message.
+OpenClaw's `AGENTS.md` has been updated with:
+- **EOT rule**: append the checkmark only to the final completion message
+- **Nonce rule**: when a message starts with `[req:XXXXXX]`, include `[req:XXXXXX]` in the final message before the checkmark (e.g., `[req:a3f7b2] ✅`)
+- **Context rule**: when a message starts with `[WITH CONTEXT n]`, strip the prefix, fetch the last n messages from the Telegram chat locally, prepend as context, then execute
 
 ## How It Works
 

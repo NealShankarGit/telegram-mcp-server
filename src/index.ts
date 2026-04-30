@@ -105,10 +105,10 @@ function createMcpServer(): Server {
 			{
 				name: 'telegram_context_and_send',
 				description:
-					'Send a follow-up instruction to @NSHClawBot with recent conversation history automatically prepended. ' +
+					'Send a follow-up instruction to @NSHClawBot with conversation context. ' +
 					'Use this when iterating on an existing task so OpenClaw has context from the prior exchange. ' +
-					'Reads the last history_limit messages, formats them with sender/timestamp/text, ' +
-					'prepends them as "Recent conversation context:", then sends and waits for EOT exactly like telegram_send_and_wait.',
+					'Prepends [WITH CONTEXT n] to the message — OpenClaw reads its own chat history locally on Oracle, ' +
+					'so context never travels through Telegram. Then waits for EOT exactly like telegram_send_and_wait.',
 				inputSchema: {
 					type: 'object',
 					properties: {
