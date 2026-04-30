@@ -199,9 +199,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_connect_timeout 10s;
     }
 }
 ```
+
+> **Important:** The `proxy_read_timeout` and `proxy_send_timeout` must be set high enough to cover the longest possible tool call (up to 120s + 30s diagnostic wait + buffer). The defaults (60s) will cause nginx to drop the SSE connection mid-request, resulting in `"MCP server connection lost"` errors on the client.
 
 Then add SSL and enable:
 
@@ -239,6 +244,18 @@ These values are set in `telegram_helper.py`:
 | `idle_timeout` | 30s | Silence duration before fallback return (when no EOT received) |
 | `timeout_seconds` | 120s | Hard ceiling before diagnostic ping (configurable per-call) |
 | Diagnostic ping wait | 30s | Extra wait after sending a diagnostic ping |
+
+## Timeout Configuration
+
+Tool calls can take up to 150 seconds (120s timeout + 30s diagnostic ping wait). Every layer must allow this:
+
+| Layer | Setting | Value | Why |
+|-------|---------|-------|-----|
+| Nginx | `proxy_read_timeout` | 300s | Prevents nginx from killing the SSE stream while waiting for the Python helper |
+| Nginx | `proxy_send_timeout` | 300s | Prevents nginx from killing the upstream response mid-write |
+| Node.js | `server.timeout` | 0 (disabled) | Prevents Node from aborting long-running requests |
+| Node.js | `server.keepAliveTimeout` | 300s | Prevents Node from closing idle keep-alive connections (Cloudflare reuses them) |
+| Node.js | `server.headersTimeout` | 305s | Must exceed `keepAliveTimeout` per Node.js docs |
 
 ## Session Management
 

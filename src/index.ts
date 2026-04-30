@@ -239,6 +239,10 @@ async function main(): Promise<void> {
 		process.stdout.write(`Telegram MCP server running on http://0.0.0.0:${config.port}\n`);
 	});
 
+	server.timeout = 0;
+	server.keepAliveTimeout = 300_000;
+	server.headersTimeout = 305_000;
+
 	const shutdown = (): void => {
 		process.stdout.write('\nShutting down...\n');
 		for (const [, session] of transports) {
