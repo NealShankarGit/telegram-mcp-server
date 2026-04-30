@@ -16,7 +16,6 @@ const config = {
 	apiId: process.env.TELEGRAM_API_ID ?? '',
 	apiHash: process.env.TELEGRAM_API_HASH ?? '',
 	sessionString: process.env.TELEGRAM_SESSION_STRING ?? '',
-	authToken: process.env.MCP_AUTH_TOKEN ?? '',
 	port: Number.parseInt(process.env.PORT ?? '3001', 10),
 };
 
@@ -85,7 +84,7 @@ function createMcpServer(): Server {
 				description:
 					'Send a command message to the @NSHClawBot Telegram bot and wait for the complete response. ' +
 					'The bot may reply with a burst of sequential messages as it streams its response. ' +
-					'This tool collects all messages until the bot stops sending (5 seconds of silence) ' +
+					'This tool collects all messages until the bot stops sending (15 seconds of silence) ' +
 					'and returns them concatenated as a single string.',
 				inputSchema: {
 					type: 'object',
@@ -133,30 +132,6 @@ async function main(): Promise<void> {
 		if (req.path === '/mcp') return next();
 		express.json()(req, res, next);
 	});
-
-	// Auth middleware for /mcp
-	const authMiddleware = (req: Request, res: Response, next: () => void): void => {
-		if (req.path !== '/mcp') {
-			next();
-			return;
-		}
-
-		const authHeader = req.headers.authorization;
-		if (!authHeader || !authHeader.startsWith('Bearer ')) {
-			res.status(401).json({ error: 'Missing or invalid Authorization header' });
-			return;
-		}
-
-		const token = authHeader.slice(7);
-		if (token !== config.authToken) {
-			res.status(403).json({ error: 'Invalid auth token' });
-			return;
-		}
-
-		next();
-	};
-
-	app.use(authMiddleware);
 
 	app.get('/health', (_req: Request, res: Response) => {
 		res.json({ status: 'ok' });

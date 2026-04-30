@@ -18,7 +18,7 @@ async def send_and_wait(
     message: str,
     timeout_seconds: int = 120,
     poll_interval: float = 2.0,
-    idle_timeout: float = 5.0,
+    idle_timeout: float = 15.0,
     bot_username: str = "NSHClawBot",
     sender_name: str = "NSH OpenClaw",
 ):
