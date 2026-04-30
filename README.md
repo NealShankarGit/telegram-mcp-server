@@ -12,20 +12,64 @@ Telegram bots that stream responses send them as a burst of sequential messages 
 
 ## Solution
 
-`telegram_send_and_wait` sends a message to the target bot, polls for new replies, and uses an idle timer to detect when the bot has finished its burst. All collected messages are concatenated chronologically and returned as a single string.
+`telegram_send_and_wait` sends a message to the target bot, polls for new replies, and uses an end-of-transmission (EOT) protocol to detect when the bot has finished. All collected messages are concatenated chronologically and returned as a single string.
 
 ## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `telegram_send_and_wait` | Send a command to @NSHClawBot and return the complete response as a single concatenated string |
+| `telegram_send_and_wait` | Send a command to @NSHClawBot, wait for the complete response using EOT detection, return all messages concatenated |
+| `telegram_get_history` | Read the last N messages from the @NSHClawBot chat with sender, timestamp, and text |
+| `telegram_send_message` | Fire-and-forget: send a message to @NSHClawBot and return immediately with no polling |
 
-### Parameters
+### `telegram_send_and_wait`
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `message` | string | Yes | — | The command message to send to @NSHClawBot |
 | `timeout_seconds` | number | No | 120 | Max seconds to wait for the first response before considering the bot unresponsive |
+
+### `telegram_get_history`
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | number | No | 10 | Number of recent messages to retrieve |
+
+### `telegram_send_message`
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `message` | string | Yes | — | The message to send to @NSHClawBot |
+
+## End-of-Transmission (EOT) Protocol
+
+The server uses a three-tier detection system to know when the bot has finished responding:
+
+### 1. EOT Signal (primary path)
+
+The bot appends a checkmark emoji to its final completion message. The moment the server sees a message ending with that marker, it:
+
+- Strips the marker and any surrounding whitespace from the message
+- Concatenates all collected messages in chronological order
+- Returns immediately — no idle wait needed
+
+The marker is **always stripped** before returning, so callers never see it.
+
+### 2. Idle Timer (fallback path)
+
+If the bot does not send the EOT marker (crash, stuck loop, older bot version), a **30-second idle timer** kicks in. Every new message resets the timer. If 30 full seconds pass with no new message, the server returns all collected messages.
+
+### 3. Hard Timeout (safety net)
+
+If `timeout_seconds` (default 120) elapses before the **first** reply ever arrives:
+
+1. A diagnostic ping is sent: _"Previous command may not have completed — are you still running?"_
+2. Waits an additional 30 seconds for any response
+3. If still nothing, returns an error: `"OpenClaw unresponsive — recommend checking systemctl --user status openclaw-gateway on Oracle instance 132.226.77.178"`
+
+### Bot-Side Configuration
+
+OpenClaw's `AGENTS.md` has been updated with the corresponding rule: append the EOT marker only to the final completion message of any response. The marker must be the last non-whitespace character in the message.
 
 ## How It Works
 
@@ -37,23 +81,15 @@ Claude sends "telegram_send_and_wait" tool call
 │  1. Record baseline (latest message ID)         │
 │  2. Send command to @NSHClawBot via Telegram    │
 │  3. Poll every 2s for new messages              │
-│  4. On first reply → start 15s idle timer       │
-│  5. Each new message resets idle timer to 15s   │
-│  6. 15s of silence → burst complete             │
+│  4. On each message, check for EOT marker       │
+│  5. EOT found → strip marker, return instantly  │
+│  6. No EOT → 30s idle fallback                  │
 │  7. Concatenate all messages, return as string   │
 └─────────────────────────────────────────────────┘
          │
          ▼
 Claude receives full response in one tool result
 ```
-
-### Timeout & Retry Logic
-
-If `timeout_seconds` elapses before any reply arrives:
-
-1. A diagnostic ping is sent: _"Previous command may not have completed — are you still running?"_
-2. Waits an additional 30 seconds for any response
-3. If still nothing, returns an error with troubleshooting instructions
 
 ## Architecture
 
@@ -65,10 +101,10 @@ If `timeout_seconds` elapses before any reply arrives:
 │  │ MCP Server  │      │  Python Helper   │     │
 │  │ (Streamable │─────►│  (Telethon)      │     │
 │  │  HTTP)      │      │                  │     │
-│  │ Express +   │      │  - Send message  │     │
-│  │ TypeScript  │      │  - Poll replies  │     │
-│  └─────────────┘      │  - Idle detect   │     │
-│                       │  - Concatenate   │     │
+│  │ Express +   │      │  - Send & wait   │     │
+│  │ TypeScript  │      │  - Get history   │     │
+│  └─────────────┘      │  - Send message  │     │
+│                       │  - EOT detect    │     │
 │                       └──────────────────┘     │
 │                              │                  │
 │                              ▼                  │
@@ -200,8 +236,8 @@ These values are set in `telegram_helper.py`:
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `poll_interval` | 2s | How often to check for new messages |
-| `idle_timeout` | 15s | Silence duration before considering the burst complete |
-| `timeout_seconds` | 120s | Max wait for the first reply (configurable per-call) |
+| `idle_timeout` | 30s | Silence duration before fallback return (when no EOT received) |
+| `timeout_seconds` | 120s | Hard ceiling before diagnostic ping (configurable per-call) |
 | Diagnostic ping wait | 30s | Extra wait after sending a diagnostic ping |
 
 ## Session Management

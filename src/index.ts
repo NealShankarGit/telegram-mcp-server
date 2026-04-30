@@ -22,6 +22,7 @@ const config = {
 interface ToolArguments {
 	message?: string;
 	timeout_seconds?: number;
+	limit?: number;
 }
 
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -39,20 +40,17 @@ function cleanupStaleSessions(): void {
 
 setInterval(cleanupStaleSessions, 5 * 60 * 1000);
 
-async function callTelegramHelper(message: string, timeoutSeconds: number): Promise<string> {
-	const args = JSON.stringify({
+async function callTelegramHelper(args: Record<string, unknown>, timeoutMs: number): Promise<string> {
+	const payload = JSON.stringify({
 		api_id: config.apiId,
 		api_hash: config.apiHash,
 		session_string: config.sessionString,
-		message,
-		timeout_seconds: timeoutSeconds,
+		...args,
 	});
 
-	const maxExec = (timeoutSeconds + 60) * 1000;
-
 	try {
-		const { stdout, stderr } = await execFileAsync('python3', [HELPER_SCRIPT, args], {
-			timeout: maxExec,
+		const { stdout, stderr } = await execFileAsync('python3', [HELPER_SCRIPT, payload], {
+			timeout: timeoutMs,
 			maxBuffer: 10 * 1024 * 1024,
 		});
 
@@ -66,8 +64,8 @@ async function callTelegramHelper(message: string, timeoutSeconds: number): Prom
 		}
 		return result.result;
 	} catch (error) {
-		const message = error instanceof Error ? error.message : 'Unknown error';
-		return `Error calling Telegram helper: ${message}`;
+		const msg = error instanceof Error ? error.message : 'Unknown error';
+		return `Error calling Telegram helper: ${msg}`;
 	}
 }
 
@@ -82,10 +80,12 @@ function createMcpServer(): Server {
 			{
 				name: 'telegram_send_and_wait',
 				description:
-					'Send a command message to the @NSHClawBot Telegram bot and wait for the complete response. ' +
-					'The bot may reply with a burst of sequential messages as it streams its response. ' +
-					'This tool collects all messages until the bot stops sending (15 seconds of silence) ' +
-					'and returns them concatenated as a single string.',
+					'Send a command to @NSHClawBot and wait for the complete response. ' +
+					'Uses an end-of-transmission (EOT) protocol: watches for a checkmark emoji ' +
+					'as termination signal in the bot\'s final message, then returns immediately. ' +
+					'Falls back to a 30-second idle timer if EOT is not received. ' +
+					'Hard timeout at 120 seconds (configurable) triggers a diagnostic ping. ' +
+					'All collected messages are concatenated chronologically. The EOT marker is always stripped before returning.',
 				inputSchema: {
 					type: 'object',
 					properties: {
@@ -102,6 +102,38 @@ function createMcpServer(): Server {
 					required: ['message'],
 				},
 			},
+			{
+				name: 'telegram_get_history',
+				description:
+					'Read the last N messages from the @NSHClawBot chat. ' +
+					'Returns formatted messages with sender, timestamp, and text. ' +
+					'Useful for reading truncated responses or checking recent activity without sending a new command.',
+				inputSchema: {
+					type: 'object',
+					properties: {
+						limit: {
+							type: 'number',
+							description: 'Number of recent messages to retrieve (default: 10)',
+						},
+					},
+				},
+			},
+			{
+				name: 'telegram_send_message',
+				description:
+					'Fire-and-forget: send a message to @NSHClawBot and return immediately after send confirmation. ' +
+					'No polling, no waiting for a response. Useful for quick commands where a blocking response is not needed.',
+				inputSchema: {
+					type: 'object',
+					properties: {
+						message: {
+							type: 'string',
+							description: 'The message to send to @NSHClawBot',
+						},
+					},
+					required: ['message'],
+				},
+			},
 		],
 	}));
 
@@ -109,18 +141,42 @@ function createMcpServer(): Server {
 		const { name, arguments: args } = request.params;
 		const typedArgs = (args ?? {}) as ToolArguments;
 
-		if (name !== 'telegram_send_and_wait') {
-			throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+		switch (name) {
+			case 'telegram_send_and_wait': {
+				if (!typedArgs.message) {
+					throw new McpError(ErrorCode.InvalidParams, 'message is required');
+				}
+				const timeout = typedArgs.timeout_seconds ?? 120;
+				const result = await callTelegramHelper(
+					{ command: 'send_and_wait', message: typedArgs.message, timeout_seconds: timeout },
+					(timeout + 60) * 1000,
+				);
+				return { content: [{ type: 'text', text: result }] };
+			}
+
+			case 'telegram_get_history': {
+				const limit = typedArgs.limit ?? 10;
+				const result = await callTelegramHelper(
+					{ command: 'get_history', limit },
+					30_000,
+				);
+				return { content: [{ type: 'text', text: result }] };
+			}
+
+			case 'telegram_send_message': {
+				if (!typedArgs.message) {
+					throw new McpError(ErrorCode.InvalidParams, 'message is required');
+				}
+				const result = await callTelegramHelper(
+					{ command: 'send_message', message: typedArgs.message },
+					30_000,
+				);
+				return { content: [{ type: 'text', text: result }] };
+			}
+
+			default:
+				throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
 		}
-
-		if (!typedArgs.message) {
-			throw new McpError(ErrorCode.InvalidParams, 'message is required');
-		}
-
-		const timeout = typedArgs.timeout_seconds ?? 120;
-		const result = await callTelegramHelper(typedArgs.message, timeout);
-
-		return { content: [{ type: 'text', text: result }] };
 	});
 
 	return server;
