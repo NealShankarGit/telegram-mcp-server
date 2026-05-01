@@ -4,8 +4,6 @@
 import asyncio
 import json
 import os
-import re
-import secrets
 import sys
 import time
 from datetime import timezone
@@ -16,15 +14,10 @@ from telethon.sessions import StringSession
 EOT_MARKER = "\u2705"
 BOT_USERNAME = "NSHClawBot"
 SENDER_NAME = "NSH OpenClaw"
-NONCE_PATTERN = re.compile(r"\[req:[0-9a-f]{6}\]\s*")
 
 
 def make_client(api_id, api_hash, session_string):
     return TelegramClient(StringSession(session_string), api_id, api_hash)
-
-
-def generate_nonce():
-    return secrets.token_hex(3)
 
 
 async def connect_and_resolve(client):
@@ -66,20 +59,8 @@ def strip_eot(text):
     return text
 
 
-def strip_nonce(text):
-    return NONCE_PATTERN.sub("", text)
-
-
 def has_eot(text):
     return text.rstrip().endswith(EOT_MARKER)
-
-
-def burst_contains_nonce(collected, nonce):
-    tag = f"[req:{nonce}]"
-    for msg in collected:
-        if tag in (msg.text or ""):
-            return True
-    return False
 
 
 def format_history(messages):
@@ -108,7 +89,6 @@ def collect_and_return(collected, eot_detected):
     texts = []
     for msg in collected:
         text = msg.text or ""
-        text = strip_nonce(text)
         texts.append(text)
     if eot_detected and texts:
         texts[-1] = strip_eot(texts[-1])
@@ -117,10 +97,8 @@ def collect_and_return(collected, eot_detected):
 
 
 async def send_and_wait(api_id, api_hash, session_string, message, timeout_seconds=300):
-    """Send message with nonce, wait for EOT. Lenient nonce: bare EOT accepted after 5s grace."""
+    """Send message, wait for EOT. Uses recency-based detection (baseline_id) — no nonce needed."""
     poll_interval = 2.0
-    nonce_grace_seconds = 5.0
-    nonce = generate_nonce()
 
     client = make_client(api_id, api_hash, session_string)
     entity = await connect_and_resolve(client)
@@ -131,24 +109,17 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
     baseline_id = history[0].id if history else 0
     send_time = time.time()
 
-    outgoing = f"[req:{nonce}] {message}"
-    await client.send_message(entity, outgoing)
+    # Send the raw message unchanged — no nonce prefix
+    await client.send_message(entity, message)
 
     collected = []
     first_received = False
     deadline = send_time + timeout_seconds
     ping_sent = False
     eot_detected = False
-    # Track when we first saw a bare EOT (no nonce match) for grace window
-    bare_eot_seen_at = None
 
     while True:
         now = time.time()
-
-        # If we saw a bare EOT and grace window expired, accept it
-        if bare_eot_seen_at and (now - bare_eot_seen_at >= nonce_grace_seconds):
-            eot_detected = True
-            break
 
         # Hard timeout
         if now >= deadline:
@@ -190,19 +161,9 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
             if not first_received:
                 first_received = True
 
-            # EOT detection
+            # EOT detection — any ✅ from bot after our message is accepted
             latest_text = (new_msgs[-1].text or "").rstrip()
             if has_eot(latest_text):
-                if burst_contains_nonce(collected, nonce):
-                    # Nonce matched — return immediately
-                    eot_detected = True
-                    break
-                elif bare_eot_seen_at is None:
-                    # Bare EOT without nonce — start 5s grace window
-                    bare_eot_seen_at = time.time()
-
-            # If we're in grace window and nonce just arrived in a non-EOT message, accept now
-            if bare_eot_seen_at and burst_contains_nonce(collected, nonce):
                 eot_detected = True
                 break
 
@@ -219,7 +180,7 @@ async def context_and_send(api_id, api_hash, session_string, message, history_li
 
 
 async def status_check(api_id, api_hash, session_string):
-    """Quick pulse check with 30s timeout, no EOT detection, no nonce."""
+    """Quick pulse check with 30s timeout, no EOT detection."""
     poll_interval = 2.0
     timeout_seconds = 30
 
