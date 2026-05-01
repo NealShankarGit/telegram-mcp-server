@@ -28,7 +28,7 @@ def generate_nonce():
 
 
 async def connect_and_resolve(client):
-    """Connect, authorize, and resolve the bot entity. Returns entity or prints error and returns None."""
+    """Connect, authorize, and resolve the bot entity."""
     await client.connect()
     if not await client.is_user_authorized():
         print(json.dumps({"error": "Telegram session is not authorized. Re-generate the session string."}))
@@ -61,24 +61,20 @@ def is_from_bot(msg):
 
 
 def strip_eot(text):
-    """Strip the EOT marker and surrounding whitespace from the end of text."""
     if text.rstrip().endswith(EOT_MARKER):
         return text.rstrip()[: -len(EOT_MARKER)].rstrip()
     return text
 
 
 def strip_nonce(text):
-    """Strip [req:XXXXXX] tags from text."""
     return NONCE_PATTERN.sub("", text)
 
 
 def has_eot(text):
-    """Check if text ends with the EOT marker."""
     return text.rstrip().endswith(EOT_MARKER)
 
 
 def burst_contains_nonce(collected, nonce):
-    """Check if any collected message contains the matching [req:nonce]."""
     tag = f"[req:{nonce}]"
     for msg in collected:
         if tag in (msg.text or ""):
@@ -87,7 +83,6 @@ def burst_contains_nonce(collected, nonce):
 
 
 def format_history(messages):
-    """Format messages into readable text with sender, timestamp, and content."""
     lines = []
     for msg in reversed(messages):
         sender = msg.sender
@@ -109,7 +104,6 @@ def format_history(messages):
 
 
 def collect_and_return(collected, eot_detected):
-    """Sort collected messages, strip EOT and nonce tags, concatenate and print result."""
     collected.sort(key=lambda m: m.id)
     texts = []
     for msg in collected:
@@ -123,8 +117,9 @@ def collect_and_return(collected, eot_detected):
 
 
 async def send_and_wait(api_id, api_hash, session_string, message, timeout_seconds=300):
-    """Send message with nonce and wait for EOT with matching nonce or hard timeout."""
+    """Send message with nonce, wait for EOT. Lenient nonce: bare EOT accepted after 5s grace."""
     poll_interval = 2.0
+    nonce_grace_seconds = 5.0
     nonce = generate_nonce()
 
     client = make_client(api_id, api_hash, session_string)
@@ -144,9 +139,16 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
     deadline = send_time + timeout_seconds
     ping_sent = False
     eot_detected = False
+    # Track when we first saw a bare EOT (no nonce match) for grace window
+    bare_eot_seen_at = None
 
     while True:
         now = time.time()
+
+        # If we saw a bare EOT and grace window expired, accept it
+        if bare_eot_seen_at and (now - bare_eot_seen_at >= nonce_grace_seconds):
+            eot_detected = True
+            break
 
         # Hard timeout
         if now >= deadline:
@@ -188,9 +190,19 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
             if not first_received:
                 first_received = True
 
-            # EOT detection — only accept if burst contains matching nonce
+            # EOT detection
             latest_text = (new_msgs[-1].text or "").rstrip()
-            if has_eot(latest_text) and burst_contains_nonce(collected, nonce):
+            if has_eot(latest_text):
+                if burst_contains_nonce(collected, nonce):
+                    # Nonce matched — return immediately
+                    eot_detected = True
+                    break
+                elif bare_eot_seen_at is None:
+                    # Bare EOT without nonce — start 5s grace window
+                    bare_eot_seen_at = time.time()
+
+            # If we're in grace window and nonce just arrived in a non-EOT message, accept now
+            if bare_eot_seen_at and burst_contains_nonce(collected, nonce):
                 eot_detected = True
                 break
 
@@ -232,10 +244,8 @@ async def status_check(api_id, api_hash, session_string):
 
     while True:
         now = time.time()
-
         if now >= deadline:
             break
-
         if last_message_time and (now - last_message_time >= idle_timeout):
             break
 
@@ -261,7 +271,7 @@ async def status_check(api_id, api_hash, session_string):
     await client.disconnect()
 
     if not collected:
-        print(json.dumps({"result": "No response within 30 seconds — bot may be offline."}))
+        print(json.dumps({"result": "No response within 30 seconds \u2014 bot may be offline."}))
         return
 
     collected.sort(key=lambda m: m.id)
@@ -274,7 +284,6 @@ async def get_history(api_id, api_hash, session_string, limit=10):
     entity = await connect_and_resolve(client)
     if not entity:
         return
-
     messages = await client.get_messages(entity, limit=limit)
     await client.disconnect()
     print(json.dumps({"result": format_history(messages)}))
@@ -285,7 +294,6 @@ async def send_message(api_id, api_hash, session_string, message):
     entity = await connect_and_resolve(client)
     if not entity:
         return
-
     await client.send_message(entity, message)
     await client.disconnect()
     print(json.dumps({"result": f"Message sent to @{BOT_USERNAME}"}))
