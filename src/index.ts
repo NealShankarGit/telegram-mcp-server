@@ -26,6 +26,10 @@ interface ToolArguments {
 	history_limit?: number;
 }
 
+function stripCodeFences(text: string): string {
+	return text.replace(/^```[a-zA-Z]*\n?/gm, '').replace(/^```$/gm, '');
+}
+
 // --- Synchronous helper — blocks until Python process completes ---
 async function callTelegramHelper(args: Record<string, unknown>, timeoutMs: number): Promise<string> {
 	const payload = JSON.stringify({
@@ -49,7 +53,7 @@ async function callTelegramHelper(args: Record<string, unknown>, timeoutMs: numb
 		if (result.error) {
 			return `Error: ${result.error}`;
 		}
-		return result.result;
+		return stripCodeFences(result.result);
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : 'Unknown error';
 		return `Error calling Telegram helper: ${msg}`;
@@ -130,16 +134,6 @@ function createMcpServer(): Server {
 				},
 			},
 			{
-				name: 'telegram_status',
-				description:
-					'Quick pulse check on @NSHClawBot. Sends a short status query and returns whatever comes back within 30 seconds. ' +
-					'Use this to check if the bot is alive and what it is currently working on before sending a new task.',
-				inputSchema: {
-					type: 'object',
-					properties: {},
-				},
-			},
-			{
 				name: 'telegram_get_history',
 				description:
 					'Read the last N messages from the @NSHClawBot chat. ' +
@@ -211,14 +205,6 @@ function createMcpServer(): Server {
 						timeout_seconds: timeout,
 					},
 					(timeout + 60) * 1000,
-				);
-				return { content: [{ type: 'text', text: result }] };
-			}
-
-			case 'telegram_status': {
-				const result = await callTelegramHelper(
-					{ command: 'status' },
-					60_000,
 				);
 				return { content: [{ type: 'text', text: result }] };
 			}

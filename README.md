@@ -20,7 +20,6 @@ Blocking call pattern: `telegram_send_and_wait` sends the message and blocks ser
 |------|-------------|----------|-------------|
 | `telegram_send_and_wait` | New tasks | Blocking | Send command, block until ✅ response arrives |
 | `telegram_context_and_send` | Iterating on existing work | Blocking | Prepend `[WITH CONTEXT n]`, same blocking pattern |
-| `telegram_status` | Pulse checks | Blocking (30s max) | Quick status query |
 | `telegram_get_history` | Reading past messages | Blocking (fast) | Fetch last N messages |
 | `telegram_send_message` | Fire-and-forget | Returns immediately | Send without waiting |
 
@@ -42,10 +41,6 @@ Blocks until the bot sends a message ending with ✅, then returns the full conc
 | `timeout_seconds` | number | No | 300 | Max seconds to wait for response |
 
 The message is sent as `[WITH CONTEXT 10] Your instruction here`. OpenClaw strips the prefix, fetches the last N messages from its own Telegram chat locally, prepends them as context, then executes. Context never travels through Telegram — it stays on Oracle.
-
-### `telegram_status`
-
-No parameters. Sends a fixed status query, returns within 30 seconds.
 
 ### `telegram_get_history`
 
@@ -92,10 +87,8 @@ This recency-based approach handles concurrent sessions without nonces: each `se
 
 If `timeout_seconds` (default 300) elapses with no ✅ detected:
 
-1. A diagnostic ping is sent: _"Previous command may not have completed — are you still running?"_
-2. Waits an additional 30 seconds
-3. If any messages were collected, returns them concatenated (partial result)
-4. If nothing was collected, returns an error with troubleshooting instructions
+1. If any messages were collected, returns them concatenated (partial result)
+2. If nothing was collected, returns an error with troubleshooting instructions
 
 ### Bot-Side Configuration
 
@@ -116,7 +109,6 @@ OpenClaw's `AGENTS.md` has been updated with:
 |  | Express +   |      | All calls block: |      |
 |  | TypeScript  |----->|  - Send & wait   |      |
 |  |             |      |  - Context+send  |      |
-|  |             |      |  - Status check  |      |
 |  +-------------+      |  - Get history   |      |
 |                       |  - Send message  |      |
 |                       +------------------+      |
@@ -253,10 +245,7 @@ systemctl start telegram-mcp
 | Parameter | Value | Location | Description |
 |-----------|-------|----------|-------------|
 | `poll_interval` | 2s | telegram_helper.py | How often to check for new Telegram messages |
-| `timeout_seconds` | 300s | telegram_helper.py | Hard ceiling before diagnostic ping |
-| Diagnostic ping wait | 30s | telegram_helper.py | Extra wait after diagnostic ping |
-| `telegram_status` timeout | 30s | telegram_helper.py | Fixed timeout for pulse checks |
-| `telegram_status` idle | 15s | telegram_helper.py | Idle return for status responses |
+| `timeout_seconds` | 300s | telegram_helper.py | Hard ceiling before returning partial result or error |
 
 ## Session Management
 

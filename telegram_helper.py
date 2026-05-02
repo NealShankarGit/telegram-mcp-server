@@ -113,36 +113,11 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
     await client.send_message(entity, message)
 
     collected = []
-    first_received = False
-    deadline = send_time + timeout_seconds
-    ping_sent = False
     eot_detected = False
+    deadline = send_time + timeout_seconds
 
     while True:
-        now = time.time()
-
-        # Hard timeout
-        if now >= deadline:
-            if not ping_sent:
-                await client.send_message(
-                    entity,
-                    "Previous command may not have completed \u2014 are you still running?",
-                )
-                ping_sent = True
-                deadline = now + 30
-                continue
-            else:
-                if collected:
-                    await client.disconnect()
-                    collect_and_return(collected, False)
-                    return
-                print(json.dumps({
-                    "error": "OpenClaw unresponsive \u2014 recommend checking systemctl --user status openclaw-gateway on Oracle instance 132.226.77.178"
-                }))
-                await client.disconnect()
-                return
-
-        # Poll for new messages
+        # Poll for new messages first — check for ✅ before evaluating timeout
         messages = await client.get_messages(entity, limit=50, min_id=baseline_id)
         collected_ids = {m.id for m in collected}
         new_msgs = []
@@ -158,14 +133,24 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
             new_msgs.sort(key=lambda m: m.id)
             collected.extend(new_msgs)
             baseline_id = max(m.id for m in collected)
-            if not first_received:
-                first_received = True
 
             # EOT detection — any ✅ from bot after our message is accepted
             latest_text = (new_msgs[-1].text or "").rstrip()
             if has_eot(latest_text):
                 eot_detected = True
                 break
+
+        # Hard timeout
+        if time.time() >= deadline:
+            if collected:
+                await client.disconnect()
+                collect_and_return(collected, False)
+                return
+            print(json.dumps({
+                "error": "OpenClaw unresponsive \u2014 recommend checking systemctl --user status openclaw-gateway on Oracle instance 132.226.77.178"
+            }))
+            await client.disconnect()
+            return
 
         await asyncio.sleep(poll_interval)
 
@@ -177,67 +162,6 @@ async def context_and_send(api_id, api_hash, session_string, message, history_li
     """Prepend [WITH CONTEXT n] prefix and send_and_wait. Context stays on Oracle."""
     prefixed = f"[WITH CONTEXT {history_limit}] {message}"
     await send_and_wait(api_id, api_hash, session_string, prefixed, timeout_seconds)
-
-
-async def status_check(api_id, api_hash, session_string):
-    """Quick pulse check with 30s timeout, no EOT detection."""
-    poll_interval = 2.0
-    timeout_seconds = 30
-
-    client = make_client(api_id, api_hash, session_string)
-    entity = await connect_and_resolve(client)
-    if not entity:
-        return
-
-    history = await client.get_messages(entity, limit=1)
-    baseline_id = history[0].id if history else 0
-    send_time = time.time()
-
-    await client.send_message(
-        entity,
-        "Quick status check \u2014 what are you currently working on, or are you idle? Reply in one sentence.",
-    )
-
-    collected = []
-    last_message_time = None
-    idle_timeout = 15.0
-    deadline = send_time + timeout_seconds
-
-    while True:
-        now = time.time()
-        if now >= deadline:
-            break
-        if last_message_time and (now - last_message_time >= idle_timeout):
-            break
-
-        messages = await client.get_messages(entity, limit=10, min_id=baseline_id)
-        collected_ids = {m.id for m in collected}
-        new_msgs = []
-        for msg in messages:
-            if msg.id <= baseline_id:
-                continue
-            if not is_from_bot(msg):
-                continue
-            if msg.id not in collected_ids:
-                new_msgs.append(msg)
-
-        if new_msgs:
-            new_msgs.sort(key=lambda m: m.id)
-            collected.extend(new_msgs)
-            baseline_id = max(m.id for m in collected)
-            last_message_time = time.time()
-
-        await asyncio.sleep(poll_interval)
-
-    await client.disconnect()
-
-    if not collected:
-        print(json.dumps({"result": "No response within 30 seconds \u2014 bot may be offline."}))
-        return
-
-    collected.sort(key=lambda m: m.id)
-    texts = [strip_eot(m.text or "") for m in collected]
-    print(json.dumps({"result": "\n".join(texts)}))
 
 
 async def get_history(api_id, api_hash, session_string, limit=10):
@@ -283,10 +207,6 @@ def main():
             message=args["message"],
             history_limit=int(args.get("history_limit", 10)),
             timeout_seconds=int(args.get("timeout_seconds", 300)),
-        ))
-    elif command == "status":
-        asyncio.run(status_check(
-            api_id=api_id, api_hash=api_hash, session_string=session_string,
         ))
     elif command == "get_history":
         asyncio.run(get_history(
