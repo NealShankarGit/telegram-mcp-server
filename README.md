@@ -253,6 +253,17 @@ systemctl start telegram-mcp
 - **Automatic cleanup** — stale sessions are pruned every 5 minutes
 - **Graceful re-init** — if a client sends a stale session ID (e.g., after server restart), the server returns 404 to trigger automatic re-initialization
 
+## Message Chunking
+
+Telegram enforces a hard 4096-character limit per message. The helper automatically splits outbound messages that exceed this limit using `chunk_message()`:
+
+1. Splits at the last newline before the limit, falling back to the last space, then hard-cutting at 4096
+2. Intermediate chunks are sent with a 300ms delay between each
+3. Only the final chunk carries the nonce / triggers EOT detection in `send_and_wait`
+4. Single-chunk messages (≤4096 chars) have zero behavior change
+
+This applies to all outbound send paths: `send_message`, `send_and_wait`, and `context_and_send`.
+
 ## Known Limitations
 
 - **User account required** — uses the Telegram user API (MTProto) via Telethon, not the Bot API, because it needs to read messages _from_ the bot in a private chat

@@ -63,6 +63,25 @@ def has_eot(text):
     return text.rstrip().endswith(EOT_MARKER)
 
 
+def chunk_message(text, limit=4096):
+    """Split text into chunks that fit within Telegram's message size limit."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        split_at = text.rfind('\n', 0, limit)
+        if split_at == -1:
+            split_at = text.rfind(' ', 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip('\n')
+    return chunks
+
+
 def format_history(messages):
     lines = []
     for msg in reversed(messages):
@@ -110,7 +129,12 @@ async def send_and_wait(api_id, api_hash, session_string, message, timeout_secon
     send_time = time.time()
 
     # Send the raw message unchanged — no nonce prefix
-    await client.send_message(entity, message)
+    # Chunk if over Telegram's 4096-char limit
+    chunks = chunk_message(message)
+    for chunk in chunks[:-1]:
+        await client.send_message(entity, chunk)
+        await asyncio.sleep(0.3)
+    await client.send_message(entity, chunks[-1])
 
     collected = []
     eot_detected = False
@@ -179,7 +203,11 @@ async def send_message(api_id, api_hash, session_string, message):
     entity = await connect_and_resolve(client)
     if not entity:
         return
-    await client.send_message(entity, message)
+    chunks = chunk_message(message)
+    for chunk in chunks[:-1]:
+        await client.send_message(entity, chunk)
+        await asyncio.sleep(0.3)
+    await client.send_message(entity, chunks[-1])
     await client.disconnect()
     print(json.dumps({"result": f"Message sent to @{BOT_USERNAME}"}))
 
